@@ -1,0 +1,4 @@
+PROJECT_STATUS_FOR_CLAUDE.md
+__pycache__/
+*.pyc
+*.pyo

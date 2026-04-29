@@ -1,0 +1,35 @@
+#!/usr/sbin/nft -f
+#
+# Protection 2: FTP Brute-Force Rate Limiting (ADDITIVE)
+#
+# Limits new TCP connections to port 21 to 4 per minute per source IP.
+# This chain runs at priority -10, before the base firewall rules,
+# so brute-force attempts are blocked before they reach the policy checks.
+#
+# Apply on top of firewall-rules.nft:
+#   r1 nft -f firewall-rules.nft
+#   r2 nft -f firewall-rules.nft
+#   r1 nft -f protection/protection_2.nft
+#   r2 nft -f protection/protection_2.nft
+#
+# Verify the meter during an attack:
+#   r1 nft list meters
+#   r2 nft list meters
+
+table inet filter {
+    chain ftp_brute_protection {
+        type filter hook forward priority -10; policy accept;
+
+        # Internet -> FTP server (active on r2 only)
+        iifname "r2-eth0" tcp dport 21 ct state new \
+            meter ftp_limit_inet { ip saddr limit rate 4/minute burst 3 packets } \
+            accept
+        iifname "r2-eth0" tcp dport 21 ct state new drop
+
+        # Workstations -> FTP server (active on r1 only)
+        iifname "r1-eth0" tcp dport 21 ct state new \
+            meter ftp_limit_ws { ip saddr limit rate 4/minute burst 3 packets } \
+            accept
+        iifname "r1-eth0" tcp dport 21 ct state new drop
+    }
+}

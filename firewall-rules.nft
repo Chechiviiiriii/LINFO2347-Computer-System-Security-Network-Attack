@@ -1,0 +1,92 @@
+#!/usr/sbin/nft -f
+#
+# =============================================================================
+#  Basic Enterprise Network Protection - Unified firewall ruleset
+# =============================================================================
+#
+#  This file contains the firewall rules for BOTH routers of the topology
+#  (r1 and r2). Each router must load only its own section, since each one
+#  enforces a different portion of the global policy.
+#
+#  How to apply (from the mininet CLI):
+#       mininet> r1 nft -f firewall-rules.nft
+#       mininet> r2 nft -f firewall-rules.nft
+#
+#  Both routers load the same file. The rules are written using the source
+#  network (ip saddr), destination network (ip daddr), and input interface
+#  (iifname) so that each router only matches the traffic that actually
+#  transits through it.
+#
+# -----------------------------------------------------------------------------
+#  Network topology recap
+# -----------------------------------------------------------------------------
+#   - Workstation LAN : 10.1.0.0/24    (ws2, ws3)         - behind r1
+#   - DMZ LAN         : 10.12.0.0/24   (http/dns/ntp/ftp)  - between r1 and r2
+#   - Internet        : 10.2.0.0/24    (internet)           - behind r2
+#
+#   DMZ servers have their default gateway set to r2 (10.12.0.2).
+#   r2 has a static route: 10.1.0.0/24 via r1 (10.12.0.1).
+#
+# -----------------------------------------------------------------------------
+#  Global policy enforced
+# -----------------------------------------------------------------------------
+#   - Workstations  -> can initiate connections to anywhere.
+#   - DMZ servers   -> cannot initiate any connection (reply only).
+#   - Internet      -> can only initiate connections towards the DMZ.
+#   - Return traffic of established/related flows is always accepted.
+# =============================================================================
+
+flush ruleset
+
+table inet filter {
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+
+        # ---------------------------------------------------------------------
+        # Common rule (applies on both r1 and r2)
+        # ---------------------------------------------------------------------
+        # Allow replies to already-established connections in any direction.
+        ct state established,related accept
+
+        # ---------------------------------------------------------------------
+        # Workstations -> anywhere (matches on r1 and r2)
+        # ---------------------------------------------------------------------
+        # Workstations may initiate new connections to the DMZ, the Internet,
+        # or other workstations.
+        ip saddr 10.1.0.0/24 ct state new accept
+
+        # ---------------------------------------------------------------------
+        # Internet -> DMZ (matches only on r2)
+        # ---------------------------------------------------------------------
+        # The Internet may initiate connections only towards the DMZ so that
+        # public services (HTTP, DNS, NTP, FTP) remain reachable.
+        ip saddr 10.2.0.0/24 ip daddr 10.12.0.0/24 ct state new accept
+
+        # ---------------------------------------------------------------------
+        # DMZ reply traffic back to Workstations (r2 only)
+        # ---------------------------------------------------------------------
+        # DMZ servers use r2 as their default gateway. When a workstation
+        # initiates a connection to a DMZ server (routed through r1), the DMZ
+        # server's reply travels back through r2. At r2, conntrack has no
+        # record of the original request (which transited r1, not r2), so the
+        # reply would appear as ct state new and be dropped.
+        #
+        # This rule accepts such traffic at r2 (matched by iifname "r2-eth12",
+        # the DMZ-side interface of r2) so the reply can reach r1, where
+        # conntrack DOES have the established state and correctly accepts it.
+        #
+        # Security: on r1, iifname "r2-eth12" never matches (r1 has no such
+        # interface), so DMZ servers still cannot initiate NEW connections to
+        # workstations -- r1 enforces the policy for all new flows.
+        iifname "r2-eth12" ip saddr 10.12.0.0/24 ip daddr 10.1.0.0/24 accept
+
+        # ---------------------------------------------------------------------
+        # Default drop (applies on both r1 and r2)
+        # ---------------------------------------------------------------------
+        # Everything else falls through to the default drop policy:
+        #   - Internet -> Workstations         : blocked
+        #   - DMZ      -> Internet (new)       : blocked
+        #   - DMZ      -> Workstations (new)   : blocked at r1 (iifname check
+        #                                        prevents r2 from being bypassed)
+    }
+}
