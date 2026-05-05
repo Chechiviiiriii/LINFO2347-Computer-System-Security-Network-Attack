@@ -1,0 +1,7 @@
+table inet antispoof {
+    chain prerouting {
+        type filter hook prerouting priority -300; policy accept;
+        iifname "r2-eth0" ip saddr 10.1.0.0/24 counter packets 0 bytes 0 drop
+        iifname "r2-eth0" ip saddr 10.12.0.0/24 counter packets 0 bytes 0 drop
+    }
+}
