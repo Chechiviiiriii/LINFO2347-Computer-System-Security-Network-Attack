@@ -78,6 +78,61 @@ internet ping -c 2 -W 2 10.1.0.2 # Internet -> WS  : 100% loss (blocked)
 
 ---
 
+### Attack 1 -- Network Scan
+
+#### The attack (`attacks/attack_1.py`)
+
+The script performs reconnaissance against the DMZ from the Internet host. It first sends ICMP Echo Requests to discover reachable DMZ hosts, then sends TCP SYN packets to a small set of common service ports to identify which services are open.
+
+The attack is implemented with Scapy only -- no external scanning tools. It probes the four DMZ servers (`http`, `dns`, `ntp`, `ftp`) and checks ports `21`, `22`, `53`, `80`, `123`, `443`, and `5353`.
+
+**Run the attack (no protection):**
+
+```
+r1 nft -f firewall-rules.nft
+r2 nft -f firewall-rules.nft
+internet python3 attacks/attack_1.py
+```
+
+Expected output: the script lists alive DMZ hosts and reports open TCP ports such as HTTP on `80/tcp`, FTP on `21/tcp`, SSH on `22/tcp`, and DNS on `5353/tcp` if the service responds over TCP.
+
+#### The protection (`protection/protection_1.nft`)
+
+The protection rate-limits scan-like traffic from the Internet towards the DMZ. ICMP sweep traffic is limited to `2/second` with a burst of 2 packets, and TCP SYN scan traffic is limited to `5/second` with a burst of 3 packets.
+
+**How it does not break the base firewall:**
+
+`protection_1.nft` is additive -- it adds a separate chain at hook priority `-1` and does not flush the base firewall. It only limits ICMP and new TCP SYN packets from `10.2.0.0/24` to `10.12.0.0/24`; other traffic continues to be handled by the base rules.
+
+**Apply the protection on top of the base firewall:**
+
+```
+r1 nft -f firewall-rules.nft
+r2 nft -f firewall-rules.nft
+r2 nft -f protection/protection_1.nft
+```
+
+**Run the attack with protection active:**
+
+```
+internet python3 attacks/attack_1.py
+```
+
+Expected output: the scan becomes incomplete or slower because excess ICMP/SYN probes are dropped, while legitimate low-rate access remains possible.
+
+**Verify baseline tests still pass:**
+
+```
+ws2 ping -c 2 10.12.0.10
+ws2 ping -c 2 10.2.0.2
+internet ping -c 2 10.12.0.10
+http ping -c 2 -W 2 10.1.0.2
+http ping -c 2 -W 2 10.2.0.2
+internet ping -c 2 -W 2 10.1.0.2
+```
+
+---
+
 ### Attack 2 -- FTP Brute-Force
 
 #### The attack (`attacks/attack_2.py`)
@@ -157,61 +212,74 @@ internet ping -c 2 -W 2 10.1.0.2
 
 ---
 
-### Attack 3 -- ARP Cache Poisoning (Man-in-the-Middle)
+### Attack 4 -- Reflected DNS Flood
 
-#### The attack (`attacks/attack_3.py`)
+#### The attack (`attacks/attack_4.py`)
 
-ARP (Address Resolution Protocol) operates at Layer 2 and has no authentication mechanism: any host can send an ARP reply claiming to own any IP address. The script exploits this by continuously sending forged ARP replies to two targets, inserting the attacker into the middle of their communication.
+The script performs a reflected DNS flood using IP spoofing. It runs from the Internet host and sends DNS requests to the DMZ DNS server (`dns`, `10.12.0.20:5353`) while forging the source IP as the victim workstation (`ws2`, `10.1.0.2`). The DNS server then sends its replies to the victim, reflecting traffic through a legitimate DMZ service.
 
-The script is implemented with Scapy only -- no external attack tools. The core logic:
+The attack is implemented with Scapy only -- no external attack tools. Each packet is a UDP DNS query for `example.com` with:
 
-1. **Resolve real MACs** -- `getmacbyip()` sends an ARP request to learn the genuine MAC of each target before poisoning begins.
-2. **Forge ARP replies** -- two packets are built per round:
-   - To target2: "target1's IP is at attacker's MAC"
-   - To target1: "target2's IP is at attacker's MAC"
-3. **Send periodically** -- `sendp()` delivers the forged replies directly at Layer 2 (Ethernet frame with explicit destination MAC), bypassing the OS routing stack.
-4. **Restore on exit** -- on Ctrl+C or normal termination, the real MAC mappings are sent to both victims (repeated 5 times) to undo the poisoning.
-
-The attack must be launched from a host on the same LAN segment as both targets (ARP is not routed). In this topology, ws3 attacks the ws2 -- r1 pair on the 10.1.0.0/24 segment.
-
-**Important:** ARP poisoning only updates an existing cache entry. Trigger initial communication between the targets first so their ARP caches are populated, then the forged replies overwrite those entries.
+- source IP: `10.1.0.2` (victim)
+- destination IP: `10.12.0.20` (DNS reflector)
+- destination port: `5353`
 
 **Run the attack (no protection):**
 
 ```
 r1 nft -f firewall-rules.nft
 r2 nft -f firewall-rules.nft
-ws3 python3 attacks/attack_3.py --target1 10.1.0.2 --target2 10.1.0.1 --verbose > /tmp/ataque.log 2>&1 &
+ws2 timeout 8 tcpdump -i any -n "udp and src host 10.12.0.20 and port 5353" -c 10 > /tmp/attack_4.log 2>&1 &
+internet python3 attacks/attack_4.py
+ws2 cat /tmp/attack_4.log
 ```
 
-Force initial ARP resolution on both targets:
+Expected output: `ws2` captures DNS replies from `10.12.0.20`, even though `ws2` did not send the DNS queries itself.
+
+#### The protection (`protection/protection_4.nft`)
+
+The protection implements ingress anti-spoofing on `r2`. Packets entering from the Internet-facing interface (`r2-eth0`) are dropped if they claim to come from internal enterprise ranges (`10.1.0.0/24` or `10.12.0.0/24`).
+
+**How it does not break the base firewall:**
+
+`protection_4.nft` is additive -- it creates a separate `inet` table with a `prerouting` chain and does not flush the base firewall. Legitimate Internet traffic has source `10.2.0.0/24`, so normal Internet-to-DMZ access is unaffected.
+
+**Apply the protection on top of the base firewall:**
 
 ```
-ws2 ping -c 1 10.1.0.1
-r1 ping -c 1 10.1.0.2
+r1 nft -f firewall-rules.nft
+r2 nft -f firewall-rules.nft
+r2 nft -f protection/protection_4.nft
 ```
 
-Verify the ARP caches have been poisoned (both should show ws3's MAC):
+**Run the attack with protection active:**
 
 ```
-ws2 ip neigh show
-r1 ip neigh show
+ws2 timeout 8 tcpdump -i any -n "udp and src host 10.12.0.20 and port 5353" -c 5 > /tmp/attack_4_protected.log 2>&1 &
+internet python3 attacks/attack_4.py
+ws2 cat /tmp/attack_4_protected.log
 ```
 
-Confirm traffic interception -- ws2's packets to the DMZ pass through ws3:
+Expected output: `ws2` should not receive reflected DNS replies because the spoofed packets are dropped before reaching the DNS server.
+
+**Inspect the protection counter:**
 
 ```
-ws3 tcpdump -i any -n icmp -w /tmp/intercept.pcap &
-ws2 ping -c 5 10.12.0.10
-ws3 kill %2
-ws3 tcpdump -r /tmp/intercept.pcap -n
+r2 nft list ruleset
 ```
 
-Evidence of interception: ICMP Redirect messages (`From 10.1.0.3: Redirect Host`) appear in ws2's ping output, confirming packets reached ws3 before being forwarded.
+The drop counter in `protection_4.nft` should increase while the attack runs.
 
-#### The protection (`protection/protection_3.nft`)
+**Verify baseline tests still pass:**
 
-> Protection not yet implemented.
+```
+ws2 ping -c 2 10.12.0.10
+ws2 ping -c 2 10.2.0.2
+internet ping -c 2 10.12.0.10
+http ping -c 2 -W 2 10.1.0.2
+http ping -c 2 -W 2 10.2.0.2
+internet ping -c 2 -W 2 10.1.0.2
+```
 
 ---
 
@@ -222,9 +290,12 @@ project-network-attacks/
 |-- topo.py                  # Mininet topology (provided by the course)
 |-- firewall-rules.nft       # Base three-zone enterprise firewall
 |-- attacks/
+|   |-- attack_1.py          # Network scan (Scapy)
 |   |-- attack_2.py          # FTP brute-force (Python stdlib, no dependencies)
-|   `-- attack_3.py          # ARP cache poisoning MITM (Scapy)
+|   `-- attack_4.py          # Reflected DNS flood (Scapy)
 |-- protection/
-|   `-- protection_2.nft     # FTP rate-limiting (additive nftables chain)
+|   |-- protection_1.nft     # ICMP/SYN scan rate-limiting
+|   |-- protection_2.nft     # FTP rate-limiting (additive nftables chain)
+|   `-- protection_4.nft     # Anti-spoofing for reflected DNS flood
 `-- README.md
 ```

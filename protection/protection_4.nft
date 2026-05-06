@@ -1,0 +1,21 @@
+#!/usr/sbin/nft -f
+#
+# Protection 4: Anti-spoofing against Reflected DNS Flood (ADDITIVE)
+#
+# Drops packets entering from the Internet-facing interface with source
+# addresses that belong to internal enterprise networks. This prevents the
+# attacker from spoofing ws2 as the source of DNS queries.
+#
+# Apply on top of firewall-rules.nft:
+#   r1 nft -f firewall-rules.nft
+#   r2 nft -f firewall-rules.nft
+#   r2 nft -f protection/protection_4.nft
+#
+table inet antispoof {
+    chain prerouting {
+        type filter hook prerouting priority -300; policy accept;
+
+        iifname "r2-eth0" ip saddr 10.1.0.0/24 counter drop
+        iifname "r2-eth0" ip saddr 10.12.0.0/24 counter drop
+    }
+}
