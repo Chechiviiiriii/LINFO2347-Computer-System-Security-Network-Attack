@@ -1,0 +1,14 @@
+#!/usr/sbin/nft -f
+#
+# Protection 3: ARP Anti-Spoofing (generated at runtime)
+#
+# This file is intentionally a documented template. Mininet MAC addresses are
+# generated dynamically, so the usable ruleset must be generated after the
+# topology starts.
+#
+# Use:
+#   ws2 sh protection/protection_3_apply.sh 10.1.0.1
+#   r1  sh protection/protection_3_apply.sh 10.1.0.2
+#
+# The helper resolves the current legitimate MAC and loads a concrete nftables
+# ARP rule that drops forged replies for that IP.

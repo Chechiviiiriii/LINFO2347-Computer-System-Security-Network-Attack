@@ -11,28 +11,20 @@
 #   r2 nft -f firewall-rules.nft
 #   r2 nft -f protection/protection_1.nft
 #
+
 table inet filter_scan {
     chain forward_scan {
-        type filter hook forward priority -1; policy accept;
+        type filter hook forward priority -10; policy accept;
 
         # Allow already established or related traffic.
-        ct state established,related accept
+        ct state established,related accept;
 
         # Limit ICMP sweep traffic from Internet to DMZ.
-        ip saddr 10.2.0.0/24 ip daddr 10.12.0.0/24 ip protocol icmp \
-            meter icmp_meter { ip saddr limit rate 2/second burst 2 packets } \
-            accept
-
-        ip saddr 10.2.0.0/24 ip daddr 10.12.0.0/24 ip protocol icmp drop
+        ip saddr 10.2.0.0/24 ip daddr 10.12.0.0/24 ip protocol icmp meter icmp_meter { ip saddr limit rate 1/second burst 1 packets } accept;
+        ip saddr 10.2.0.0/24 ip daddr 10.12.0.0/24 ip protocol icmp drop;
 
         # Limit TCP SYN scan traffic from Internet to DMZ.
-        ip saddr 10.2.0.0/24 ip daddr 10.12.0.0/24 \
-            tcp flags & (fin|syn|rst|ack) == syn \
-            meter syn_meter { ip saddr limit rate 5/second burst 3 packets } \
-            accept
-
-        ip saddr 10.2.0.0/24 ip daddr 10.12.0.0/24 \
-            tcp flags & (fin|syn|rst|ack) == syn drop
+        ip saddr 10.2.0.0/24 ip daddr 10.12.0.0/24 tcp flags & (fin|syn|rst|ack) == syn meter syn_meter { ip saddr limit rate 1/second burst 1 packets } accept;
+        ip saddr 10.2.0.0/24 ip daddr 10.12.0.0/24 tcp flags & (fin|syn|rst|ack) == syn drop;
     }
 }
-

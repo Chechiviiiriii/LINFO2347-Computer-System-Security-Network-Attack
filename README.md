@@ -82,9 +82,9 @@ internet ping -c 2 -W 2 10.1.0.2 # Internet -> WS  : 100% loss (blocked)
 
 #### The attack (`attacks/attack_1.py`)
 
-The script performs reconnaissance against the DMZ from the Internet host. It first sends ICMP Echo Requests to discover reachable DMZ hosts, then sends TCP SYN packets to a small set of common service ports to identify which services are open.
+The script performs reconnaissance against the DMZ from the Internet host. It first sends a burst of ICMP Echo Requests to discover reachable DMZ hosts, then sends a burst of TCP SYN packets to identify which services are open.
 
-The attack is implemented with Scapy only -- no external scanning tools. It probes the four DMZ servers (`http`, `dns`, `ntp`, `ftp`) and checks ports `21`, `22`, `53`, `80`, `123`, `443`, and `5353`.
+The attack is implemented with Scapy only -- no external scanning tools. It probes the four DMZ servers (`http`, `dns`, `ntp`, `ftp`) and checks ports `21`, `22`, `53`, `80`, `123`, `443`, and `5353`. The script sends `12` ICMP probes (`3` per host) and `28` TCP SYN probes (`4` hosts x `7` ports) in short bursts. This models a fast reconnaissance phase and makes rate-limit based protection visible.
 
 **Run the attack (no protection):**
 
@@ -94,15 +94,36 @@ r2 nft -f firewall-rules.nft
 internet python3 attacks/attack_1.py
 ```
 
-Expected output: the script lists alive DMZ hosts and reports open TCP ports such as HTTP on `80/tcp`, FTP on `21/tcp`, SSH on `22/tcp`, and DNS on `5353/tcp` if the service responds over TCP.
+Expected output without protection: the script discovers the full DMZ and identifies several exposed services.
+
+```
+[*] ICMP sweep
+[*] Sending 12 ICMP probes in burst
+[+] Host alive: 10.12.0.10
+[+] Host alive: 10.12.0.20
+[+] Host alive: 10.12.0.30
+[+] Host alive: 10.12.0.40
+
+[*] TCP SYN scan
+[*] Sending 28 TCP SYN probes in burst
+```
+
+Observed open services without protection:
+
+```
+10.12.0.10: 22/tcp OPEN, 80/tcp OPEN
+10.12.0.20: 5353/tcp OPEN
+10.12.0.30: 22/tcp OPEN
+10.12.0.40: 21/tcp OPEN, 22/tcp OPEN
+```
 
 #### The protection (`protection/protection_1.nft`)
 
-The protection rate-limits scan-like traffic from the Internet towards the DMZ. ICMP sweep traffic is limited to `2/second` with a burst of 2 packets, and TCP SYN scan traffic is limited to `5/second` with a burst of 3 packets.
+The protection rate-limits scan-like traffic from the Internet towards the DMZ. ICMP sweep traffic is limited to `1/second` with a burst of `1` packet, and TCP SYN scan traffic is limited to `1/second` with a burst of `1` packet.
 
 **How it does not break the base firewall:**
 
-`protection_1.nft` is additive -- it adds a separate chain at hook priority `-1` and does not flush the base firewall. It only limits ICMP and new TCP SYN packets from `10.2.0.0/24` to `10.12.0.0/24`; other traffic continues to be handled by the base rules.
+`protection_1.nft` is additive -- it adds a separate chain at hook priority `-10` and does not flush the base firewall. It only limits ICMP and new TCP SYN packets from `10.2.0.0/24` to `10.12.0.0/24`; other traffic continues to be handled by the base rules.
 
 **Apply the protection on top of the base firewall:**
 
@@ -118,17 +139,69 @@ r2 nft -f protection/protection_1.nft
 internet python3 attacks/attack_1.py
 ```
 
-Expected output: the scan becomes incomplete or slower because excess ICMP/SYN probes are dropped, while legitimate low-rate access remains possible.
+Expected output with protection: the ICMP burst may still discover hosts because a few probes are allowed, but the TCP SYN burst is heavily degraded. Most ports become `filtered or no response`, so the attacker can no longer reliably enumerate exposed services.
+
+Observed result with protection:
+
+```
+[*] ICMP sweep
+[*] Sending 12 ICMP probes in burst
+[+] Host alive: 10.12.0.10
+[+] Host alive: 10.12.0.20
+[+] Host alive: 10.12.0.30
+[+] Host alive: 10.12.0.40
+
+[*] TCP SYN scan
+[*] Sending 28 TCP SYN probes in burst
+
+[*] Target 10.12.0.10
+  21/tcp closed
+  22/tcp filtered or no response
+  53/tcp filtered or no response
+  80/tcp filtered or no response
+  123/tcp filtered or no response
+  443/tcp filtered or no response
+  5353/tcp filtered or no response
+
+[*] Target 10.12.0.20
+  21/tcp filtered or no response
+  22/tcp filtered or no response
+  53/tcp filtered or no response
+  80/tcp filtered or no response
+  123/tcp filtered or no response
+  443/tcp filtered or no response
+  5353/tcp filtered or no response
+
+[*] Target 10.12.0.30
+  21/tcp filtered or no response
+  22/tcp filtered or no response
+  53/tcp filtered or no response
+  80/tcp filtered or no response
+  123/tcp filtered or no response
+  443/tcp filtered or no response
+  5353/tcp filtered or no response
+
+[*] Target 10.12.0.40
+  21/tcp filtered or no response
+  22/tcp filtered or no response
+  53/tcp filtered or no response
+  80/tcp filtered or no response
+  123/tcp filtered or no response
+  443/tcp filtered or no response
+  5353/tcp filtered or no response
+```
+
+This confirms that the protection does not block the Internet host completely and does not rely on the attacker's IP address specifically. It structurally reduces high-rate ICMP/SYN reconnaissance while keeping legitimate low-rate traffic possible.
 
 **Verify baseline tests still pass:**
 
 ```
-ws2 ping -c 2 10.12.0.10
-ws2 ping -c 2 10.2.0.2
-internet ping -c 2 10.12.0.10
-http ping -c 2 -W 2 10.1.0.2
-http ping -c 2 -W 2 10.2.0.2
-internet ping -c 2 -W 2 10.1.0.2
+ws2 ping -c 2 10.12.0.10         # WS -> DMZ       : 0% loss
+ws2 ping -c 2 10.2.0.2           # WS -> Internet  : 0% loss
+internet ping -c 2 10.12.0.10    # Internet -> DMZ : 0% loss
+http ping -c 2 -W 2 10.1.0.2     # DMZ -> WS       : 100% loss
+http ping -c 2 -W 2 10.2.0.2     # DMZ -> Internet : 100% loss
+internet ping -c 2 -W 2 10.1.0.2 # Internet -> WS  : 100% loss
 ```
 
 ---
@@ -151,7 +224,9 @@ Server -> Client : 230 Login successful   (or 530 Login incorrect)
 The script distinguishes three outcomes per attempt:
 - `SUCCESS` -- server returned 230 (valid credentials found)
 - `rejected` -- server returned 530 (wrong credentials, connection worked)
-- `blocked/timeout` -- connection timed out or was refused (rate-limit active)
+- `blocked/timeout` -- connection timed out or was refused
+
+Timing note: the script uses a `5` second socket timeout and a `0.2` second delay between attempts. This delay is intentionally added for the Mininet lab so `vsftpd` can answer consistently during the unprotected test. It should not be interpreted as a realistic Internet brute-force speed. Even with this lab-friendly delay, the attack still performs about 300 login attempts per minute, which is far above normal interactive FTP usage and enough to trigger the protection.
 
 **Run the attack (no protection):**
 
@@ -161,11 +236,11 @@ r2 nft -f firewall-rules.nft
 internet python3 attacks/attack_2.py 10.12.0.40
 ```
 
-Expected output: 199 `rejected`, 1 `SUCCESS` (`mininet:mininet`).
+Expected output: mostly `rejected`, and eventually 1 `SUCCESS` if the valid pair `mininet:mininet` is reached. Occasional `blocked/timeout` lines without protection can come from the FTP service timing out under repeated failed logins, not from nftables.
 
 #### The protection (`protection/protection_2.nft`)
 
-The protection limits new TCP connections to port 21 to **4 per minute per source IP** (with an initial burst of 3). A brute-force that opens dozens of connections per second is stopped after the first burst; a legitimate user opening 1-2 FTP sessions is unaffected.
+The protection limits new TCP connections to port 21 to **4 per minute per source IP** (with an initial burst of 3). A brute-force that opens hundreds of connections per minute is stopped after the first burst; a legitimate user opening 1-2 FTP sessions is unaffected.
 
 **How it does not break the base firewall:**
 
@@ -191,7 +266,7 @@ r2 nft -f protection/protection_2.nft
 internet python3 attacks/attack_2.py 10.12.0.40
 ```
 
-Expected output: 3 `rejected` (burst), 197 `blocked/timeout`.
+Expected output: the first few attempts may be `rejected`, then most attempts become `blocked/timeout` because nftables drops new FTP connections above the configured rate limit. With protection active, `blocked/timeout` should dominate much more clearly than in the unprotected run.
 
 **Inspect the meter:**
 
@@ -202,12 +277,104 @@ r2 nft list meters
 **Verify baseline tests still pass:**
 
 ```
-ws2 ping -c 2 10.12.0.10
-ws2 ping -c 2 10.2.0.2
-internet ping -c 2 10.12.0.10
-http ping -c 2 -W 2 10.1.0.2
-http ping -c 2 -W 2 10.2.0.2
-internet ping -c 2 -W 2 10.1.0.2
+ws2 ping -c 2 10.12.0.10         # WS -> DMZ       : 0% loss
+ws2 ping -c 2 10.2.0.2           # WS -> Internet  : 0% loss
+internet ping -c 2 10.12.0.10    # Internet -> DMZ : 0% loss
+http ping -c 2 -W 2 10.1.0.2     # DMZ -> WS       : 100% loss
+http ping -c 2 -W 2 10.2.0.2     # DMZ -> Internet : 100% loss
+internet ping -c 2 -W 2 10.1.0.2 # Internet -> WS  : 100% loss
+```
+
+---
+
+### Attack 3 -- ARP Cache Poisoning
+
+#### The attack (`attacks/attack_3.py`)
+
+The script performs ARP cache poisoning on the workstation LAN. It runs from `ws3` and forges ARP replies so that `ws2` believes the gateway (`r1`, `10.1.0.1`) is at `ws3`'s MAC address, while `r1` believes `ws2` (`10.1.0.2`) is at `ws3`'s MAC address.
+
+The attack is implemented with Scapy only -- no external attack tools. The script resolves the real MAC addresses first and continuously sends forged ARP replies. It intentionally leaves the poisoned ARP entries in place after it stops so the result can be inspected.
+
+The demonstrated attack uses:
+
+- attacker: `ws3` (`10.1.0.3`)
+- victim: `ws2` (`10.1.0.2`)
+- gateway impersonated to the victim: `r1` (`10.1.0.1`)
+
+**Run the attack (no protection):**
+
+```
+r1 nft -f firewall-rules.nft
+r2 nft -f firewall-rules.nft
+ws3 sysctl -w net.ipv4.ip_forward=1
+ws2 ip link show ws2-eth0
+r1 ip link show r1-eth0
+ws3 ip link show ws3-eth0
+ws2 ping -c 1 10.1.0.1
+r1 ping -c 1 10.1.0.2
+ws2 ip neigh show 10.1.0.1
+r1 ip neigh show 10.1.0.2
+ws3 python3 attacks/attack_3.py --victim 10.1.0.2 --gateway 10.1.0.1 --duration 30 --verbose
+```
+
+After the attack finishes, verify the poisoned ARP caches:
+
+```
+ws2 ip neigh show 10.1.0.1
+r1 ip neigh show 10.1.0.2
+```
+
+Expected output: before the attack, `ws2` maps `10.1.0.1` to the real `r1` MAC and `r1` maps `10.1.0.2` to the real `ws2` MAC. After the attack, both entries should point to `ws3`'s MAC address. With IP forwarding enabled on `ws3`, `ws2` can keep connectivity while traffic is redirected through the attacker.
+
+#### The protection (`protection/protection_3.nft`)
+
+The protection filters forged ARP replies by validating expected IP-to-MAC bindings. A packet claiming that `10.1.0.1` is the gateway must use the real `r1` MAC address, and a packet claiming that `10.1.0.2` is `ws2` must use the real `ws2` MAC address.
+
+**How it does not break the base firewall:**
+
+`protection_3.nft` documents the ARP nftables protection, and `protection_3_apply.sh` generates the concrete nftables rule at runtime. This is necessary because Mininet MAC addresses are generated when the topology starts. The loaded rule uses the `arp` nftables family, separate from the `inet` table used by `firewall-rules.nft`, and only drops ARP replies with invalid IP/MAC bindings. Legitimate ARP traffic keeps working.
+
+**Apply the protection:**
+
+```
+ws2 sh protection/protection_3_apply.sh 10.1.0.1
+r1 sh protection/protection_3_apply.sh 10.1.0.2
+```
+
+Each host learns the legitimate MAC for the IP it must trust, then installs a rule that drops any ARP reply claiming that IP with a different MAC.
+
+**Inspect the generated rules:**
+
+```
+ws2 nft list ruleset
+r1 nft list ruleset
+```
+
+**Run the attack with protection active:**
+
+```
+ws2 ip neigh flush 10.1.0.1
+r1 ip neigh flush 10.1.0.2
+ws2 ping -c 1 10.1.0.1
+r1 ping -c 1 10.1.0.2
+ws2 ip neigh show 10.1.0.1
+r1 ip neigh show 10.1.0.2
+ws3 python3 attacks/attack_3.py --victim 10.1.0.2 --gateway 10.1.0.1 --duration 30 --verbose
+ws2 ip neigh show 10.1.0.1
+r1 ip neigh show 10.1.0.2
+```
+
+Expected output: the ARP tables stay mapped to the real MAC addresses instead of changing to `ws3`'s MAC. This verifies that the protection blocks the forged ARP replies without relying on a rate limit or on blocking the attacker IP.
+
+**Verify baseline tests still pass:**
+
+```
+ws2 ping -c 2 10.12.0.10         # WS -> DMZ       : 0% loss
+ws2 ping -c 2 10.2.0.2           # WS -> Internet  : 0% loss
+internet ping -c 2 10.12.0.10    # Internet -> DMZ : 0% loss
+http ping -c 2 -W 2 10.1.0.2     # DMZ -> WS       : 100% loss
+http ping -c 2 -W 2 10.2.0.2     # DMZ -> Internet : 100% loss
+internet ping -c 2 -W 2 10.1.0.2 # Internet -> WS  : 100% loss
 ```
 
 ---
@@ -229,12 +396,25 @@ The attack is implemented with Scapy only -- no external attack tools. Each pack
 ```
 r1 nft -f firewall-rules.nft
 r2 nft -f firewall-rules.nft
-ws2 timeout 8 tcpdump -i any -n "udp and src host 10.12.0.20 and port 5353" -c 10 > /tmp/attack_4.log 2>&1 &
+ws2 tcpdump -i ws2-eth0 -n 'udp and host 10.12.0.20' > /tmp/ws2_reflected_before.txt 2>&1 &
 internet python3 attacks/attack_4.py
-ws2 cat /tmp/attack_4.log
+ws2 pkill tcpdump
+ws2 cat /tmp/ws2_reflected_before.txt
 ```
 
 Expected output: `ws2` captures DNS replies from `10.12.0.20`, even though `ws2` did not send the DNS queries itself.
+
+Observed result without protection:
+
+```
+06:46:34.278199 IP 10.12.0.20.5353 > 10.1.0.2.34051: 0* 1/0/0 A 192.0.2.192 (45)
+06:46:34.281001 IP 10.12.0.20.5353 > 10.1.0.2.65443: 0* 1/0/0 A 192.0.2.192 (45)
+06:46:34.289171 IP 10.12.0.20.5353 > 10.1.0.2.39444: 0* 1/0/0 A 192.0.2.192 (45)
+...
+5000 packets captured
+5000 packets received by filter
+0 packets dropped by kernel
+```
 
 #### The protection (`protection/protection_4.nft`)
 
@@ -255,12 +435,26 @@ r2 nft -f protection/protection_4.nft
 **Run the attack with protection active:**
 
 ```
-ws2 timeout 8 tcpdump -i any -n "udp and src host 10.12.0.20 and port 5353" -c 5 > /tmp/attack_4_protected.log 2>&1 &
+ws2 tcpdump -i ws2-eth0 -n 'udp and host 10.12.0.20' > /tmp/ws2_reflected_after.txt 2>&1 &
 internet python3 attacks/attack_4.py
-ws2 cat /tmp/attack_4_protected.log
+ws2 pkill tcpdump
+ws2 cat /tmp/ws2_reflected_after.txt
 ```
 
 Expected output: `ws2` should not receive reflected DNS replies because the spoofed packets are dropped before reaching the DNS server.
+
+Observed result with protection:
+
+```
+tcpdump: verbose output suppressed, use -v or -vv for full protocol decode
+listening on ws2-eth0, link-type EN10MB (Ethernet), capture size 262144 bytes
+
+0 packets captured
+0 packets received by filter
+0 packets dropped by kernel
+```
+
+The demonstration therefore goes from `5000` reflected packets without protection to `0` packets with protection.
 
 **Inspect the protection counter:**
 
@@ -273,12 +467,12 @@ The drop counter in `protection_4.nft` should increase while the attack runs.
 **Verify baseline tests still pass:**
 
 ```
-ws2 ping -c 2 10.12.0.10
-ws2 ping -c 2 10.2.0.2
-internet ping -c 2 10.12.0.10
-http ping -c 2 -W 2 10.1.0.2
-http ping -c 2 -W 2 10.2.0.2
-internet ping -c 2 -W 2 10.1.0.2
+ws2 ping -c 2 10.12.0.10         # WS -> DMZ       : 0% loss
+ws2 ping -c 2 10.2.0.2           # WS -> Internet  : 0% loss
+internet ping -c 2 10.12.0.10    # Internet -> DMZ : 0% loss
+http ping -c 2 -W 2 10.1.0.2     # DMZ -> WS       : 100% loss
+http ping -c 2 -W 2 10.2.0.2     # DMZ -> Internet : 100% loss
+internet ping -c 2 -W 2 10.1.0.2 # Internet -> WS  : 100% loss
 ```
 
 ---
@@ -292,10 +486,12 @@ project-network-attacks/
 |-- attacks/
 |   |-- attack_1.py          # Network scan (Scapy)
 |   |-- attack_2.py          # FTP brute-force (Python stdlib, no dependencies)
+|   |-- attack_3.py          # ARP cache poisoning MITM (Scapy)
 |   `-- attack_4.py          # Reflected DNS flood (Scapy)
 |-- protection/
 |   |-- protection_1.nft     # ICMP/SYN scan rate-limiting
 |   |-- protection_2.nft     # FTP rate-limiting (additive nftables chain)
+|   |-- protection_3.nft     # ARP anti-spoofing with IP/MAC validation
 |   `-- protection_4.nft     # Anti-spoofing for reflected DNS flood
 `-- README.md
 ```

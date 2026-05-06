@@ -31,8 +31,8 @@ PASSWORDS = [
 # All username x password combinations
 CREDENTIALS = [(u, p) for u in USERNAMES for p in PASSWORDS]
 
-TIMEOUT = 3      # seconds per connection attempt
-DELAY   = 0.01   # seconds between attempts
+TIMEOUT = 5      # seconds per connection attempt
+DELAY   = 0.2    # seconds between attempts
 
 
 def ftp_read(sock):
