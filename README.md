@@ -117,6 +117,8 @@ Observed open services without protection:
 10.12.0.40: 21/tcp OPEN, 22/tcp OPEN
 ```
 
+![Attack 1 -- Without Protection](images/1.jpg)
+
 #### The protection (`protection/protection_1.nft`)
 
 The protection rate-limits scan-like traffic from the Internet towards the DMZ. ICMP sweep traffic is limited to `1/second` with a burst of `1` packet, and TCP SYN scan traffic is limited to `1/second` with a burst of `1` packet.
@@ -193,6 +195,8 @@ Observed result with protection:
 
 This confirms that the protection does not block the Internet host completely and does not rely on the attacker's IP address specifically. It structurally reduces high-rate ICMP/SYN reconnaissance while keeping legitimate low-rate traffic possible.
 
+![Attack 1 -- With Protection](images/2.jpg)
+
 **Verify baseline tests still pass:**
 
 ```
@@ -238,6 +242,8 @@ internet python3 attacks/attack_2.py 10.12.0.40
 
 Expected output: mostly `rejected`, and eventually 1 `SUCCESS` if the valid pair `mininet:mininet` is reached. Occasional `blocked/timeout` lines without protection can come from the FTP service timing out under repeated failed logins, not from nftables.
 
+![Attack 2 -- Without Protection](images/3.jpg)
+
 #### The protection (`protection/protection_2.nft`)
 
 The protection limits new TCP connections to port 21 to **4 per minute per source IP** (with an initial burst of 3). A brute-force that opens hundreds of connections per minute is stopped after the first burst; a legitimate user opening 1-2 FTP sessions is unaffected.
@@ -273,6 +279,8 @@ Expected output: the first few attempts may be `rejected`, then most attempts be
 ```
 r2 nft list meters
 ```
+
+![Attack 2 -- With Protection](images/4.jpg)
 
 **Verify baseline tests still pass:**
 
@@ -326,6 +334,8 @@ r1 ip neigh show 10.1.0.2
 
 Expected output: before the attack, `ws2` maps `10.1.0.1` to the real `r1` MAC and `r1` maps `10.1.0.2` to the real `ws2` MAC. After the attack, both entries should point to `ws3`'s MAC address. With IP forwarding enabled on `ws3`, `ws2` can keep connectivity while traffic is redirected through the attacker.
 
+![Attack 3 -- Without Protection](images/5.jpg)
+
 #### The protection (`protection/protection_3.nft`)
 
 The protection filters forged ARP replies by validating expected IP-to-MAC bindings. A packet claiming that `10.1.0.1` is the gateway must use the real `r1` MAC address, and a packet claiming that `10.1.0.2` is `ws2` must use the real `ws2` MAC address.
@@ -365,6 +375,8 @@ r1 ip neigh show 10.1.0.2
 ```
 
 Expected output: the ARP tables stay mapped to the real MAC addresses instead of changing to `ws3`'s MAC. This verifies that the protection blocks the forged ARP replies without relying on a rate limit or on blocking the attacker IP.
+
+![Attack 3 -- With Protection](images/6.jpg)
 
 **Verify baseline tests still pass:**
 
@@ -416,6 +428,8 @@ Observed result without protection:
 0 packets dropped by kernel
 ```
 
+![Attack 4 -- Without Protection](images/7.jpg)
+
 #### The protection (`protection/protection_4.nft`)
 
 The protection implements ingress anti-spoofing on `r2`. Packets entering from the Internet-facing interface (`r2-eth0`) are dropped if they claim to come from internal enterprise ranges (`10.1.0.0/24` or `10.12.0.0/24`).
@@ -464,6 +478,8 @@ r2 nft list ruleset
 
 The drop counter in `protection_4.nft` should increase while the attack runs.
 
+![Attack 4 -- With Protection](images/8.jpg)
+
 **Verify baseline tests still pass:**
 
 ```
@@ -492,6 +508,16 @@ project-network-attacks/
 |   |-- protection_1.nft     # ICMP/SYN scan rate-limiting
 |   |-- protection_2.nft     # FTP rate-limiting (additive nftables chain)
 |   |-- protection_3.nft     # ARP anti-spoofing with IP/MAC validation
+|   |-- protection_3_apply.sh# Runtime script to generate ARP binding rules
 |   `-- protection_4.nft     # Anti-spoofing for reflected DNS flood
+|-- images/
+|   |-- 1.jpg                # Attack 1 -- without protection
+|   |-- 2.jpg                # Attack 1 -- with protection
+|   |-- 3.jpg                # Attack 2 -- without protection
+|   |-- 4.jpg                # Attack 2 -- with protection
+|   |-- 5.jpg                # Attack 3 -- without protection
+|   |-- 6.jpg                # Attack 3 -- with protection
+|   |-- 7.jpg                # Attack 4 -- without protection
+|   `-- 8.jpg                # Attack 4 -- with protection
 `-- README.md
 ```
